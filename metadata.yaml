@@ -1,0 +1,6 @@
+homepage: "https://contimo.io/"
+documentation: "https://docs.contimo.app/platform-usage/conversion-tracking-with-gtm"
+# Gallery releases: add a version entry per released commit, e.g.
+# versions:
+#   - sha: <commit sha>
+#     changeNotes: Initial release.

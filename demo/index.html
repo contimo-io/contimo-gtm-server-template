@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Dummy Purchase Complete Event</title>
+  <!-- Google Tag Manager -->
+<!-- Google Tag Manager -->
+<script>(function(w,d,s,l){w[l]=w[l]||[];w[l].push({'gtm.start':
+new Date().getTime(),event:'gtm.js'});var f=d.getElementsByTagName(s)[0],
+j=d.createElement(s),dl=l!='dataLayer'?'?l='+l:'';j.async=true;j.src=
+'https://server-side-tagging-hnxwszip5q-uc.a.run.app/gtm.js?id=GTM-N2TK5X37'+dl;f.parentNode.insertBefore(j,f);})
+(window,document,'script','dataLayer');</script>
+<!-- End Google Tag Manager -->
+  <style>
+    body { font-family: Arial, sans-serif; padding: 2rem; background: #f9f9f9; }
+    .container { background: #fff; padding: 2rem; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.05); max-width: 400px; margin: 3rem auto; text-align: center; }
+    button { padding: 0.75rem 2rem; font-size: 1.1rem; border: none; border-radius: 4px; background: #007bff; color: #fff; cursor: pointer; transition: background 0.2s; }
+    button:hover { background: #0056b3; }
+    .success { color: green; margin-top: 1rem; }
+  </style>
+</head>
+<body>
+  <!-- Google Tag Manager (noscript) -->
+<noscript><iframe src="https://server-side-tagging-hnxwszip5q-uc.a.run.app/ns.html?id=GTM-N2TK5X37"
+height="0" width="0" style="display:none;visibility:hidden"></iframe></noscript>
+<!-- End Google Tag Manager (noscript) -->
+  <div class="container">
+    <h1>Dummy Purchase Page</h1>
+    <p>Click the button below to simulate a purchase complete event.</p>
+    <button id="purchaseBtn">Complete Purchase</button>
+    <div id="message" class="success" style="display:none;">Purchase event sent!</div>
+  </div>
+  <script>
+    document.getElementById('purchaseBtn').addEventListener('click', function() {
+      window.dataLayer = window.dataLayer || [];
+      window.dataLayer.push({
+        'event': 'purchase',
+        'transaction_id': 'T12345',
+        'value': 99.99,
+        'currency': 'DKK',
+        'items': [
+          { 'item_id': 'SKU123', 'item_name': 'Test Product', 'price': 99.99, 'quantity': 1 }
+        ]
+      });
+      document.getElementById('message').style.display = 'block';
+    });
+  </script>
+</body>
+</html>
