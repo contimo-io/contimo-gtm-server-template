@@ -19,7 +19,9 @@ This is the **server container** counterpart of the [Contimo web template](https
    - Set the **Click ID storage duration** (days) to control the attribution lookback window.
    - Choose **Click ID storage**:
      - `Cookie (default)` — the Click ID is stored only in the first-party `contimo_sclid` cookie, as before.
-     - `Cookie + Contimo backend` — additionally sends the **Visitor ID** to Contimo, so a conversion can still be attributed there without the cookie (e.g. a different device/browser, or the cookie was cleared). Requires **Visitor ID** to be set; if it is missing or invalid, the tag logs a warning and falls back to cookie-only reporting instead of failing.
+     - `Cookie + Contimo backend` — writes the cookie **and** sends the **Visitor ID** to Contimo, so a conversion can still be attributed there without the cookie (e.g. a different device/browser, or the cookie was cleared).
+     - `Contimo backend only` — sends the **Visitor ID** to Contimo and does **not** write the cookie. Conversions are then attributed via the page URL or the Visitor-ID lookup only. Use this when the cookie cannot be relied upon (e.g. the server container response does not reach the browser as a first-party cookie).
+     - Both backend modes require **Visitor ID** to be set; if it is missing or invalid, the tag logs a warning and falls back to cookie-only storage instead of failing.
    - Optionally set a **Visitor ID** — an opaque, stable per-visitor identifier such as the GA4 client ID (see [Visitor ID](#visitor-id) below). It is used by both the Init and Track conversion tags.
    - Optionally enable **Send unattributed events** to still ping Contimo when a visitor lands without a Click ID (as long as a Visitor ID is present) — this shows up as an unattributed event in Event testing rather than being silently dropped.
    - Trigger: all `page_view` events.
@@ -44,14 +46,14 @@ The **Track conversion** tag resolves an identifier for the conversion in this o
 
 1. **Page URL** — the query string of the conversion event's own `page_location` (e.g. `?sclid=...`). This is the freshest signal and always wins when present, even over an existing cookie.
 2. **Cookie** — the `contimo_sclid` cookie, when the page URL carries no Click ID.
-3. **Visitor-ID lookup** — when neither of the above yields a Click ID, but a Visitor ID is provided, Contimo looks up a matching record on the backend (only available when the Init tag reported a Visitor ID with **Click ID storage** set to `Cookie + Contimo backend`).
+3. **Visitor-ID lookup** — when neither of the above yields a Click ID, but a Visitor ID is provided, Contimo looks up a matching record on the backend (only available when the Init tag reported a Visitor ID with **Click ID storage** set to `Cookie + Contimo backend` or `Contimo backend only`).
 
 If none of the three resolves and **Send unattributed events** is off, the conversion tag does not fire a request at all (as before). With it on, a request is still sent (`ua=1`) so the miss is visible, instead of being silently dropped.
 
 ### Deduplication and TTL
 
 - Contimo deduplicates conversions on **Transaction ID**: a second conversion with the same account, the same conversion type and the same `transaction_id` is flagged `duplicate` in the response and logged accordingly, and is not counted again. Conversions without a Transaction ID are not deduplicated, and events from Event testing sessions are never deduplicated. A duplicate is not treated as a tag failure.
-- **Click ID storage duration** (`clickid_ttl`) controls both how long the `contimo_sclid` cookie lives and, when **Click ID storage** is `Cookie + Contimo backend`, how many days (1-365, default 30) the backend keeps the Visitor ID record available for lookup.
+- **Click ID storage duration** (`clickid_ttl`) controls both how long the `contimo_sclid` cookie lives (when one is written) and, when **Click ID storage** includes the Contimo backend, how many days (1-365, default 30) the backend keeps the Visitor ID record available for lookup.
 
 ## Single-page conversions
 

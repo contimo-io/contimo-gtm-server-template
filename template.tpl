@@ -79,7 +79,7 @@ ___TEMPLATE_PARAMETERS___
       }
     ],
     "defaultValue": 30,
-    "valueHint": "How many days Click ID will be persisted, to attribute conversions. When Click ID storage is set to \"Cookie + Contimo backend\", the same number of days (1-365) is also sent to Contimo as the backend record's ttl."
+    "valueHint": "How many days Click ID will be persisted, to attribute conversions. When Click ID storage includes the Contimo backend, the same number of days (1-365) is also sent to Contimo as the backend record's ttl."
   },
   {
     "type": "SELECT",
@@ -92,8 +92,12 @@ ___TEMPLATE_PARAMETERS___
         "displayValue": "Cookie (default)"
       },
       {
-        "value": "backend",
+        "value": "cookie_and_backend",
         "displayValue": "Cookie + Contimo backend (requires Visitor ID)"
+      },
+      {
+        "value": "backend",
+        "displayValue": "Contimo backend only (requires Visitor ID)"
       }
     ],
     "simpleValueType": true,
@@ -105,7 +109,7 @@ ___TEMPLATE_PARAMETERS___
       }
     ],
     "defaultValue": "cookie",
-    "help": "Cookie (default) stores the Click ID only in a first-party cookie on this domain, as before. \"Cookie + Contimo backend\" additionally sends the Visitor ID to Contimo, so a later conversion can be attributed there even without the cookie (e.g. a different device, or the cookie was cleared). The cookie is written in both modes. Requires the Visitor ID field below to be set; if it is missing or invalid, this tag falls back to cookie-only reporting and logs a warning."
+    "help": "Cookie (default) stores the Click ID only in a first-party cookie on this domain, as before. \"Cookie + Contimo backend\" writes the cookie and additionally sends the Visitor ID to Contimo, so a later conversion can be attributed there even without the cookie (e.g. a different device, or the cookie was cleared). \"Contimo backend only\" sends the Visitor ID to Contimo and does not write the cookie at all; conversions are then attributed via the page URL or the Visitor ID lookup. Both backend modes require the Visitor ID field below to be set; if it is missing or invalid, this tag falls back to cookie-only storage and logs a warning."
   },
   {
     "type": "TEXT",
@@ -331,8 +335,8 @@ function getClickIdFromPageLocation(paramName) {
 // Fire-and-forget report to signal, sent for every captured Click ID. Consent is not
 // checked here: gate this tag's firing with a consent trigger in GTM, the same way you
 // would for any other tag.
-// vid/ttlDays are only appended when Click ID storage is set to "backend" and a valid
-// Visitor ID is available; pass vid as null/undefined to omit them.
+// vid/ttlDays are only appended when Click ID storage includes the Contimo backend and a
+// valid Visitor ID is available; pass vid as null/undefined to omit them.
 function reportClickIdCaptured(accountId, clickId, vid, ttlDays) {
   if (!accountId) return;
 
@@ -409,15 +413,31 @@ function sanitizeVisitorId(value) {
   return str;
 }
 
+// Click ID storage modes:
+//   cookie             - first-party cookie only (default, legacy behaviour)
+//   cookie_and_backend - cookie AND Visitor ID -> Click ID record on the Contimo backend
+//   backend            - Contimo backend only, no cookie is written
+// Both backend modes need a valid Visitor ID; without one there is nothing to key the
+// backend record on, so the tag degrades to cookie-only storage rather than losing the
+// Click ID altogether.
+function resolveStorageMode(data, vid) {
+  let storage = data.clickid_storage || 'cookie';
+  if (storage !== 'cookie' && storage !== 'cookie_and_backend' && storage !== 'backend') {
+    logToConsole('Contimo: unknown Click ID storage "' + storage + '", using "cookie".');
+    storage = 'cookie';
+  }
+  if (storage !== 'cookie' && !vid) {
+    logToConsole('Contimo: Click ID storage "' + storage + '" requires a valid Visitor ID but none is configured; falling back to cookie-only storage.');
+    storage = 'cookie';
+  }
+  return storage;
+}
+
 function init(data) {
   const clickIdParam = data.clickid_param || 'sclid';
   const clickId = getClickIdFromPageLocation(clickIdParam);
-  const storage = data.clickid_storage || 'cookie';
   const vid = sanitizeVisitorId(data.visitor_id);
-
-  if (storage === 'backend' && !vid) {
-    logToConsole('Contimo: Click ID storage is "Cookie + Contimo backend" but no valid Visitor ID is configured; falling back to cookie-only reporting.');
-  }
+  const storage = resolveStorageMode(data, vid);
 
   if (!clickId) {
     if (data.send_unattributed && vid) {
@@ -428,17 +448,24 @@ function init(data) {
   }
 
   const ttlDays = makeNumber(data.clickid_ttl) || 30;
-  reportClickIdCaptured(data.account_id, clickId, storage === 'backend' ? vid : null, ttlDays);
+  const useBackend = storage === 'cookie_and_backend' || storage === 'backend';
+  const useCookie = storage === 'cookie' || storage === 'cookie_and_backend';
 
-  setCookie(COOKIE_NAME, clickId, {
-    domain: 'auto',
-    path: '/',
-    'max-age': ttlDays * 24 * 60 * 60,
-    secure: true,
-    httpOnly: true,
-    sameSite: 'lax'
-  });
-  logToConsole('Contimo: stored Click ID', clickId);
+  reportClickIdCaptured(data.account_id, clickId, useBackend ? vid : null, ttlDays);
+
+  if (useCookie) {
+    setCookie(COOKIE_NAME, clickId, {
+      domain: 'auto',
+      path: '/',
+      'max-age': ttlDays * 24 * 60 * 60,
+      secure: true,
+      httpOnly: true,
+      sameSite: 'lax'
+    });
+    logToConsole('Contimo: stored Click ID in cookie', clickId);
+  } else {
+    logToConsole('Contimo: Click ID stored on Contimo backend only (no cookie written)', clickId);
+  }
   data.gtmOnSuccess();
 }
 
@@ -809,7 +836,29 @@ scenarios:
 
     assertApi('sendHttpGet').wasNotCalled();
     assertApi('gtmOnSuccess').wasCalled();
-- name: Init sends Visitor ID and ttl when Click ID storage is backend
+- name: Init with cookie_and_backend storage sends Visitor ID and ttl AND writes the cookie
+  code: |-
+    _eventData['page_location'] = 'https://example.com/landing?sclid=ABC123';
+
+    const mockData = {
+      action: 'init',
+      clickid_param: 'sclid',
+      clickid_ttl: 45,
+      account_id: 'ACC1',
+      clickid_storage: 'cookie_and_backend',
+      visitor_id: 'ga-client.123:456'
+    };
+
+    const expectedUrl = 'https://signal.contimo.app/c/ACC1?clid=ABC123&a=19&vid=ga-client.123%3A456&ttl=45';
+
+    runCode(mockData);
+
+    assertThat(lastHttpUrl).isEqualTo(expectedUrl);
+    assertThat(lastCookie.name).isEqualTo('contimo_sclid');
+    assertThat(lastCookie.value).isEqualTo('ABC123');
+    assertThat(lastCookie.options['max-age']).isEqualTo(45 * 24 * 60 * 60);
+    assertApi('gtmOnSuccess').wasCalled();
+- name: Init with backend-only storage sends Visitor ID and ttl and does NOT write the cookie
   code: |-
     _eventData['page_location'] = 'https://example.com/landing?sclid=ABC123';
 
@@ -827,8 +876,9 @@ scenarios:
     runCode(mockData);
 
     assertThat(lastHttpUrl).isEqualTo(expectedUrl);
+    assertApi('setCookie').wasNotCalled();
     assertApi('gtmOnSuccess').wasCalled();
-- name: Invalid Visitor ID is dropped and logged, backend report falls back to cookie-only
+- name: Init with cookie storage never sends Visitor ID even when one is configured
   code: |-
     _eventData['page_location'] = 'https://example.com/landing?sclid=ABC123';
 
@@ -837,7 +887,27 @@ scenarios:
       clickid_param: 'sclid',
       clickid_ttl: 30,
       account_id: 'ACC1',
-      clickid_storage: 'backend',
+      clickid_storage: 'cookie',
+      visitor_id: 'ga-client.123:456'
+    };
+
+    const expectedUrl = 'https://signal.contimo.app/c/ACC1?clid=ABC123&a=19';
+
+    runCode(mockData);
+
+    assertThat(lastHttpUrl).isEqualTo(expectedUrl);
+    assertThat(lastCookie.value).isEqualTo('ABC123');
+    assertApi('gtmOnSuccess').wasCalled();
+- name: Invalid Visitor ID is dropped and logged, cookie_and_backend falls back to cookie-only
+  code: |-
+    _eventData['page_location'] = 'https://example.com/landing?sclid=ABC123';
+
+    const mockData = {
+      action: 'init',
+      clickid_param: 'sclid',
+      clickid_ttl: 30,
+      account_id: 'ACC1',
+      clickid_storage: 'cookie_and_backend',
       visitor_id: 'not a valid id!'
     };
 
@@ -846,6 +916,27 @@ scenarios:
     runCode(mockData);
 
     assertThat(lastHttpUrl).isEqualTo(expectedUrl);
+    assertThat(lastCookie.value).isEqualTo('ABC123');
+    assertApi('logToConsole').wasCalled();
+    assertApi('gtmOnSuccess').wasCalled();
+- name: Backend-only storage without a Visitor ID falls back to writing the cookie
+  code: |-
+    _eventData['page_location'] = 'https://example.com/landing?sclid=ABC123';
+
+    const mockData = {
+      action: 'init',
+      clickid_param: 'sclid',
+      clickid_ttl: 30,
+      account_id: 'ACC1',
+      clickid_storage: 'backend'
+    };
+
+    const expectedUrl = 'https://signal.contimo.app/c/ACC1?clid=ABC123&a=19';
+
+    runCode(mockData);
+
+    assertThat(lastHttpUrl).isEqualTo(expectedUrl);
+    assertThat(lastCookie.value).isEqualTo('ABC123');
     assertApi('logToConsole').wasCalled();
     assertApi('gtmOnSuccess').wasCalled();
 - name: Init reports an unattributed landing when no Click ID is found but Visitor ID is present
