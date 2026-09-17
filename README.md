@@ -50,7 +50,7 @@ If none of the three resolves and **Send unattributed events** is off, the conve
 
 ### Deduplication and TTL
 
-- A conversion that the backend has already seen for the same Click ID/Visitor ID and event is flagged `duplicate` in the response and logged accordingly — it is not treated as a tag failure.
+- Contimo deduplicates conversions on **Transaction ID**: a second conversion with the same account, the same conversion type and the same `transaction_id` is flagged `duplicate` in the response and logged accordingly, and is not counted again. Conversions without a Transaction ID are not deduplicated, and events from Event testing sessions are never deduplicated. A duplicate is not treated as a tag failure.
 - **Click ID storage duration** (`clickid_ttl`) controls both how long the `contimo_sclid` cookie lives and, when **Click ID storage** is `Cookie + Contimo backend`, how many days (1-365, default 30) the backend keeps the Visitor ID record available for lookup.
 
 ## Single-page conversions
