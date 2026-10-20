@@ -63,6 +63,15 @@ Conversions that happen on the landing page itself — before any navigation —
 
 Contimo is registered under **TCF vendor ID 1299**. The template itself does not inspect consent signals — consent enforcement is the site's responsibility. Control when the `Init` tag fires using your consent management setup (e.g. a trigger condition or exception based on your CMP's consent state), so the click-ID cookie is only set for consented visitors. Same-page conversions still work without the cookie via the URL fallback described above.
 
+## Debugging with test links
+
+When the landing URL carries a Contimo **test** Click ID (issued by Event testing, prefixed `t_`), the `Init` tag also reports two debug events to Contimo, which show up in the Event testing session. Real Click IDs never trigger them.
+
+- `click_id_seen`: `Init` saw a test Click ID. `cp.clid_source` is `url` (landing page) or `cookie` (a later page, read from `contimo_sclid`), plus `cp.storages`, `cp.event_name` and `cp.host`.
+- `click_id_captured`: `Init` took the test Click ID from the landing URL, and where it was persisted. `cp.storages` (`cookie`, `cookie,backend` or `backend`), `cp.cookie` (`written`/`skipped`), `cp.backend` (`sent`/`skipped`), `cp.cookie_domain`, `cp.ttl_hours`, and `cp.storage_fallback=no_visitor_id` when a backend mode fell back to cookie-only because the Visitor ID was missing or invalid. (The same event is sent for real Click IDs too, without these debug details.)
+
+If neither event shows up, the `Init` tag did not fire for that request (check its trigger and consent conditions in GTM Preview). Both events need **Account ID** to be set on the `Init` tag.
+
 ## Notes
 
 - The server tag reports `cp.source=gtm-server` so you can distinguish server-side conversions from web-tag conversions (`cp.source=gtm`) in Contimo.

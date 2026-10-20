@@ -1,11 +1,3 @@
-___TERMS_OF_SERVICE___
-
-By creating or modifying this file you agree to Google Tag Manager's Community
-Template Gallery Developer Terms of Service available at
-https://developers.google.com/tag-manager/gallery-tos (or such other URL as
-Google may provide), as modified from time to time.
-
-
 ___INFO___
 
 {
@@ -79,7 +71,7 @@ ___TEMPLATE_PARAMETERS___
       }
     ],
     "defaultValue": 30,
-    "valueHint": "How many days Click ID will be persisted, to attribute conversions. When Click ID storage includes the Contimo backend, the same number of days (1-365) is also sent to Contimo as the backend record's ttl."
+    "valueHint": "How many days Click ID will be persisted, to attribute conversions. When Click ID storage includes the Contimo backend, the same number of days (1-365) is also sent to Contimo as the backend record\u0027s ttl."
   },
   {
     "type": "SELECT",
@@ -295,6 +287,14 @@ const JSON                = require('JSON');
 
 const COOKIE_NAME = 'contimo_sclid';
 
+// Signal endpoint base URL. Substituted by build.sh from template.src.tpl (also in the
+// send_http permission and the tests), so never edit the generated template.tpl.
+const SIGNAL_BASE_URL = 'https://signal.contimo.app';
+
+function signalUrl(accountId) {
+  return SIGNAL_BASE_URL + '/c/' + encodeUriComponent(accountId);
+}
+
 // Conversion type travels as the numeric `a` param. Must stay in sync with the
 // signal endpoint's EVENT_ACTIONS table (1 is the legacy generic conversion and
 // is not offered by this template).
@@ -313,10 +313,16 @@ const ACTION_ALIASES = {
 const RESERVED_PARAM_KEYS = ['u', 'pc', 'pt', 'pg', 'ap', 'op', 'cp'];
 
 // signal's EVENT_ACTIONS["19"] = click_id_captured. Sent for every Click ID capture,
-// test or real: signal itself decides what happens to it — a t_-prefixed (signed Event
-// testing) Click ID is routed to the customer's test session, a real one is persisted
-// (no Epom sync either way, since this has no Epom action).
+// test or real (no Epom sync either way, since this has no Epom action). For a
+// t_-prefixed (signed Event testing) Click ID it also carries debug cp params saying
+// where the Click ID was persisted, and signal routes it to the customer's test session.
 const CLICK_ID_CAPTURED_ACTION = '19';
+
+// signal's EVENT_ACTIONS["20"] = click_id_seen. Debug-only, sent ONLY for a t_-prefixed
+// Click ID, so the test session shows when Init saw it (URL or cookie). signal rejects it
+// for a real Click ID.
+const CLICK_ID_SEEN_ACTION = '20';
+const TEST_CLICK_ID_PREFIX = 't_';
 
 // Reads the Click ID from the query string of the event's page URL.
 // Covers the single-page case: on the landing page every event still
@@ -337,7 +343,8 @@ function getClickIdFromPageLocation(paramName) {
 // would for any other tag.
 // vid/ttlDays are only appended when Click ID storage includes the Contimo backend and a
 // valid Visitor ID is available; pass vid as null/undefined to omit them.
-function reportClickIdCaptured(accountId, clickId, vid, ttlDays) {
+// debugCp ([key, value] pairs, see appendDebugParams) is only appended for a test Click ID.
+function reportClickIdCaptured(accountId, clickId, vid, ttlDays, debugCp) {
   if (!accountId) return;
 
   const params = [
@@ -348,14 +355,56 @@ function reportClickIdCaptured(accountId, clickId, vid, ttlDays) {
     params.push('vid=' + encodeUriComponent(vid));
     params.push('ttl=' + ttlDays);
   }
+  if (isTestClickId(clickId)) {
+    appendDebugParams(params, debugCp);
+  }
 
-  const url = 'https://signal.contimo.app/c/' + encodeUriComponent(accountId) +
-    '?' + params.join('&');
+  const url = signalUrl(accountId) + '?' + params.join('&');
 
   logToConsole('Contimo: reporting Click ID capture', url);
   sendHttpGet(url).then(
     function() {},
     function() { logToConsole('Contimo: Click ID capture report failed (non-fatal)'); }
+  );
+}
+
+function isTestClickId(clickId) {
+  return !!clickId && makeString(clickId).indexOf(TEST_CLICK_ID_PREFIX) === 0;
+}
+
+function getPageHost() {
+  const pageLocation = getEventData('page_location');
+  const url = pageLocation ? parseUrl(pageLocation) : null;
+  return url && url.hostname ? url.hostname : '';
+}
+
+// Appends test-link debug params — cp.tag=sgtm plus each [key, value] pair as
+// cp.<key>=<value> (empty values skipped) — to a signal query param list.
+function appendDebugParams(params, cp) {
+  params.push('cp.tag=sgtm');
+  (cp || []).forEach(function(pair) {
+    const value = pair[1];
+    if (value === undefined || value === null || value === '') return;
+    params.push('cp.' + pair[0] + '=' + encodeUriComponent(makeString(value)));
+  });
+}
+
+// Fire-and-forget click_id_seen debug event. No-op for a real Click ID.
+function reportClickIdSeen(accountId, clickId, cp) {
+  if (!accountId || !isTestClickId(clickId)) return;
+
+  const params = [
+    'clid=' + encodeUriComponent(clickId),
+    'a=' + CLICK_ID_SEEN_ACTION
+  ];
+  appendDebugParams(params, cp);
+
+  const url = signalUrl(accountId) + '?' + params.join('&');
+
+  logToConsole('Contimo: reporting test Click ID seen', url);
+  sendHttpGet(url).then(
+    function() {},
+    function() { logToConsole('Contimo: Click ID seen report failed (non-fatal)'); }
   );
 }
 
@@ -365,7 +414,7 @@ function reportClickIdCaptured(accountId, clickId, vid, ttlDays) {
 function reportUnattributed(accountId, vid) {
   if (!accountId) return;
 
-  const url = 'https://signal.contimo.app/c/' + encodeUriComponent(accountId) +
+  const url = signalUrl(accountId) +
     '?a=' + CLICK_ID_CAPTURED_ACTION + '&vid=' + encodeUriComponent(vid) + '&ua=1';
 
   logToConsole('Contimo: reporting landed without Click ID (unattributed)', url);
@@ -420,8 +469,11 @@ function sanitizeVisitorId(value) {
 // Both backend modes need a valid Visitor ID; without one there is nothing to key the
 // backend record on, so the tag degrades to cookie-only storage rather than losing the
 // Click ID altogether.
+// Returns { storage, fallback }: the effective mode and, when a backend mode had to be
+// downgraded for lack of a Visitor ID, fallback = 'no_visitor_id' (reported on test links).
 function resolveStorageMode(data, vid) {
   let storage = data.clickid_storage || 'cookie';
+  let fallback = null;
   if (storage !== 'cookie' && storage !== 'cookie_and_backend' && storage !== 'backend') {
     logToConsole('Contimo: unknown Click ID storage "' + storage + '", using "cookie".');
     storage = 'cookie';
@@ -429,18 +481,40 @@ function resolveStorageMode(data, vid) {
   if (storage !== 'cookie' && !vid) {
     logToConsole('Contimo: Click ID storage "' + storage + '" requires a valid Visitor ID but none is configured; falling back to cookie-only storage.');
     storage = 'cookie';
+    fallback = 'no_visitor_id';
   }
-  return storage;
+  return { storage: storage, fallback: fallback };
 }
+
+// Wire value of cp.storages for each effective storage mode.
+const STORAGE_LISTS = {
+  cookie: 'cookie',
+  cookie_and_backend: 'cookie,backend',
+  backend: 'backend'
+};
 
 function init(data) {
   const clickIdParam = data.clickid_param || 'sclid';
   const clickId = getClickIdFromPageLocation(clickIdParam);
   const vid = sanitizeVisitorId(data.visitor_id);
-  const storage = resolveStorageMode(data, vid);
+  const mode = resolveStorageMode(data, vid);
+  const storage = mode.storage;
 
   if (!clickId) {
-    if (data.send_unattributed && vid) {
+    // Debug only: a test Click ID already stored in the cookie (e.g. a later page of the
+    // test visit) is reported as seen. Nothing is captured or re-stored from it.
+    const cookies = getCookieValues(COOKIE_NAME);
+    const cookieClickId = cookies && cookies.length ? cookies[0] : null;
+    reportClickIdSeen(data.account_id, cookieClickId, [
+      ['clid_source', 'cookie'],
+      ['storages', STORAGE_LISTS[storage]],
+      ['event_name', getEventData('event_name')],
+      ['host', getPageHost()]
+    ]);
+
+    // A Click ID already in the cookie is an attributed visitor on a later page,
+    // not an unattributed landing.
+    if (!cookieClickId && data.send_unattributed && vid) {
       reportUnattributed(data.account_id, vid);
     }
     data.gtmOnSuccess();
@@ -451,7 +525,12 @@ function init(data) {
   const useBackend = storage === 'cookie_and_backend' || storage === 'backend';
   const useCookie = storage === 'cookie' || storage === 'cookie_and_backend';
 
-  reportClickIdCaptured(data.account_id, clickId, useBackend ? vid : null, ttlDays);
+  reportClickIdSeen(data.account_id, clickId, [
+    ['clid_source', 'url'],
+    ['storages', STORAGE_LISTS[storage]],
+    ['event_name', getEventData('event_name')],
+    ['host', getPageHost()]
+  ]);
 
   if (useCookie) {
     setCookie(COOKIE_NAME, clickId, {
@@ -466,6 +545,21 @@ function init(data) {
   } else {
     logToConsole('Contimo: Click ID stored on Contimo backend only (no cookie written)', clickId);
   }
+
+  // Test links only: where the Click ID was persisted. The httpOnly cookie travels as a
+  // response header and cannot be read back within this request, so cookie=written means
+  // "Set-Cookie issued"; backend=sent means this very request carries the Visitor ID.
+  reportClickIdCaptured(data.account_id, clickId, useBackend ? vid : null, ttlDays, [
+    ['persisted', 1],
+    ['storages', STORAGE_LISTS[storage]],
+    ['cookie', useCookie ? 'written' : 'skipped'],
+    ['backend', useBackend ? 'sent' : 'skipped'],
+    ['cookie_domain', useCookie ? 'auto' : null],
+    ['ttl_hours', ttlDays * 24],
+    ['storage_fallback', mode.fallback],
+    ['host', getPageHost()]
+  ]);
+
   data.gtmOnSuccess();
 }
 
@@ -474,11 +568,7 @@ function init(data) {
 function logConversionResult(response) {
   let result = null;
   if (response && response.body) {
-    try {
-      result = JSON.parse(response.body);
-    } catch (e) {
-      result = null;
-    }
+    result = JSON.parse(response.body);
   }
 
   if (!result) {
@@ -521,7 +611,7 @@ function trackConversion(data) {
   }
 
   // Build URL
-  let url = 'https://signal.contimo.app/c/' + encodeUriComponent(data.account_id);
+  let url = signalUrl(data.account_id);
   const params = [];
   if (clickId) {
     params.push('clid=' + encodeUriComponent(clickId));
@@ -596,6 +686,10 @@ ___SERVER_PERMISSIONS___
               {
                 "type": 1,
                 "string": "page_location"
+              },
+              {
+                "type": 1,
+                "string": "event_name"
               }
             ]
           }
@@ -806,7 +900,7 @@ scenarios:
 
     const mockData = { action: 'init', clickid_param: 'sclid', clickid_ttl: 1, account_id: 'ACC1' };
 
-    const expectedUrl = 'https://signal.contimo.app/c/ACC1?clid=t_sess1_exp1_sig1&a=19';
+    const expectedUrl = 'https://signal.contimo.app/c/ACC1?clid=t_sess1_exp1_sig1&a=19&cp.tag=sgtm&cp.persisted=1&cp.storages=cookie&cp.cookie=written&cp.backend=skipped&cp.cookie_domain=auto&cp.ttl_hours=24&cp.host=example.com';
 
     runCode(mockData);
 
@@ -836,7 +930,8 @@ scenarios:
 
     assertApi('sendHttpGet').wasNotCalled();
     assertApi('gtmOnSuccess').wasCalled();
-- name: Init with cookie_and_backend storage sends Visitor ID and ttl AND writes the cookie
+- name: Init with cookie_and_backend storage sends Visitor ID and ttl AND writes the
+    cookie
   code: |-
     _eventData['page_location'] = 'https://example.com/landing?sclid=ABC123';
 
@@ -858,7 +953,8 @@ scenarios:
     assertThat(lastCookie.value).isEqualTo('ABC123');
     assertThat(lastCookie.options['max-age']).isEqualTo(45 * 24 * 60 * 60);
     assertApi('gtmOnSuccess').wasCalled();
-- name: Init with backend-only storage sends Visitor ID and ttl and does NOT write the cookie
+- name: Init with backend-only storage sends Visitor ID and ttl and does NOT write
+    the cookie
   code: |-
     _eventData['page_location'] = 'https://example.com/landing?sclid=ABC123';
 
@@ -898,7 +994,8 @@ scenarios:
     assertThat(lastHttpUrl).isEqualTo(expectedUrl);
     assertThat(lastCookie.value).isEqualTo('ABC123');
     assertApi('gtmOnSuccess').wasCalled();
-- name: Invalid Visitor ID is dropped and logged, cookie_and_backend falls back to cookie-only
+- name: Invalid Visitor ID is dropped and logged, cookie_and_backend falls back to
+    cookie-only
   code: |-
     _eventData['page_location'] = 'https://example.com/landing?sclid=ABC123';
 
@@ -939,7 +1036,8 @@ scenarios:
     assertThat(lastCookie.value).isEqualTo('ABC123');
     assertApi('logToConsole').wasCalled();
     assertApi('gtmOnSuccess').wasCalled();
-- name: Init reports an unattributed landing when no Click ID is found but Visitor ID is present
+- name: Init reports an unattributed landing when no Click ID is found but Visitor
+    ID is present
   code: |-
     _eventData['page_location'] = 'https://example.com/landing';
 
@@ -974,6 +1072,135 @@ scenarios:
 
     assertApi('sendHttpGet').wasNotCalled();
     assertApi('gtmOnSuccess').wasCalled();
+- name: Init does not report an unattributed landing when a Click ID is already in the cookie
+  code: |-
+    _cookies['contimo_sclid'] = 'ABC123';
+    _eventData['page_location'] = 'https://example.com/checkout';
+
+    const mockData = {
+      action: 'init',
+      clickid_param: 'sclid',
+      account_id: 'ACC1',
+      visitor_id: 'ga-client-123',
+      send_unattributed: true
+    };
+
+    runCode(mockData);
+
+    assertApi('sendHttpGet').wasNotCalled();
+    assertApi('gtmOnSuccess').wasCalled();
+- name: Test Click ID in cookie with Visitor ID reports click_id_seen only, not an unattributed landing
+  code: |-
+    _cookies['contimo_sclid'] = 't_sess1_exp1_sig1';
+    _eventData['page_location'] = 'https://example.com/checkout';
+    _eventData['event_name'] = 'page_view';
+
+    const mockData = {
+      action: 'init',
+      clickid_param: 'sclid',
+      account_id: 'ACC1',
+      visitor_id: 'ga-client-123',
+      send_unattributed: true
+    };
+
+    runCode(mockData);
+
+    assertThat(httpUrls).isEqualTo([
+      'https://signal.contimo.app/c/ACC1?clid=t_sess1_exp1_sig1&a=20&cp.tag=sgtm&cp.clid_source=cookie&cp.storages=cookie&cp.event_name=page_view&cp.host=example.com'
+    ]);
+    assertApi('gtmOnSuccess').wasCalled();
+- name: Test Click ID in URL reports click_id_seen, then click_id_captured with persist
+    details
+  code: |-
+    _eventData['page_location'] = 'https://shop.example.com/landing?sclid=t_sess1_exp1_sig1';
+    _eventData['event_name'] = 'page_view';
+
+    const mockData = { action: 'init', clickid_param: 'sclid', clickid_ttl: 2, account_id: 'ACC1' };
+
+    runCode(mockData);
+
+    assertThat(httpUrls).isEqualTo([
+      'https://signal.contimo.app/c/ACC1?clid=t_sess1_exp1_sig1&a=20&cp.tag=sgtm&cp.clid_source=url&cp.storages=cookie&cp.event_name=page_view&cp.host=shop.example.com',
+      'https://signal.contimo.app/c/ACC1?clid=t_sess1_exp1_sig1&a=19&cp.tag=sgtm&cp.persisted=1&cp.storages=cookie&cp.cookie=written&cp.backend=skipped&cp.cookie_domain=auto&cp.ttl_hours=48&cp.host=shop.example.com'
+    ]);
+    assertThat(lastCookie.value).isEqualTo('t_sess1_exp1_sig1');
+    assertApi('gtmOnSuccess').wasCalled();
+- name: Test Click ID capture reports backend-only storage with Visitor ID
+  code: |-
+    _eventData['page_location'] = 'https://example.com/landing?sclid=t_sess1_exp1_sig1';
+
+    const mockData = {
+      action: 'init',
+      clickid_param: 'sclid',
+      clickid_ttl: 30,
+      account_id: 'ACC1',
+      clickid_storage: 'backend',
+      visitor_id: 'ga-1'
+    };
+
+    runCode(mockData);
+
+    assertThat(lastHttpUrl).isEqualTo('https://signal.contimo.app/c/ACC1?clid=t_sess1_exp1_sig1&a=19&vid=ga-1&ttl=30&cp.tag=sgtm&cp.persisted=1&cp.storages=backend&cp.cookie=skipped&cp.backend=sent&cp.ttl_hours=720&cp.host=example.com');
+- name: Test Click ID capture reports the backend fallback when Visitor ID is missing
+  code: |-
+    _eventData['page_location'] = 'https://example.com/landing?sclid=t_sess1_exp1_sig1';
+
+    const mockData = {
+      action: 'init',
+      clickid_param: 'sclid',
+      clickid_ttl: 1,
+      account_id: 'ACC1',
+      clickid_storage: 'cookie_and_backend'
+    };
+
+    runCode(mockData);
+
+    assertThat(lastHttpUrl).isEqualTo('https://signal.contimo.app/c/ACC1?clid=t_sess1_exp1_sig1&a=19&cp.tag=sgtm&cp.persisted=1&cp.storages=cookie&cp.cookie=written&cp.backend=skipped&cp.cookie_domain=auto&cp.ttl_hours=24&cp.storage_fallback=no_visitor_id&cp.host=example.com');
+- name: Test Click ID in cookie only reports click_id_seen from cookie and stores
+    nothing
+  code: |-
+    _cookies['contimo_sclid'] = 't_sess1_exp1_sig1';
+    _eventData['page_location'] = 'https://example.com/checkout';
+    _eventData['event_name'] = 'page_view';
+
+    const mockData = { action: 'init', clickid_param: 'sclid', account_id: 'ACC1' };
+
+    runCode(mockData);
+
+    assertThat(httpUrls).isEqualTo([
+      'https://signal.contimo.app/c/ACC1?clid=t_sess1_exp1_sig1&a=20&cp.tag=sgtm&cp.clid_source=cookie&cp.storages=cookie&cp.event_name=page_view&cp.host=example.com'
+    ]);
+    assertApi('setCookie').wasNotCalled();
+    assertApi('gtmOnSuccess').wasCalled();
+- name: Real Click ID capture carries no debug params and no click_id_seen
+  code: |-
+    _eventData['page_location'] = 'https://example.com/landing?sclid=ABC123';
+
+    const mockData = { action: 'init', clickid_param: 'sclid', account_id: 'ACC1' };
+
+    runCode(mockData);
+
+    assertThat(httpUrls).isEqualTo(['https://signal.contimo.app/c/ACC1?clid=ABC123&a=19']);
+- name: Real Click ID in cookie sends nothing on Init
+  code: |-
+    _cookies['contimo_sclid'] = 'ABC123';
+    _eventData['page_location'] = 'https://example.com/checkout';
+
+    const mockData = { action: 'init', clickid_param: 'sclid', account_id: 'ACC1' };
+
+    runCode(mockData);
+
+    assertApi('sendHttpGet').wasNotCalled();
+- name: Test Click ID without account_id sends no debug events
+  code: |-
+    _eventData['page_location'] = 'https://example.com/landing?sclid=t_sess1_exp1_sig1';
+
+    const mockData = { action: 'init', clickid_param: 'sclid' };
+
+    runCode(mockData);
+
+    assertApi('sendHttpGet').wasNotCalled();
+    assertThat(lastCookie.value).isEqualTo('t_sess1_exp1_sig1');
 - name: Fire conversion (purchase) from cookie
   code: |-
     _cookies['contimo_sclid'] = 'ABC123';
@@ -1162,7 +1389,8 @@ scenarios:
 
     assertThat(lastHttpUrl).isEqualTo(expectedUrl);
     assertApi('gtmOnSuccess').wasCalled();
-- name: Conversion sends unattributed ping when neither Click ID nor Visitor ID is found and send_unattributed is on
+- name: Conversion sends unattributed ping when neither Click ID nor Visitor ID is
+    found and send_unattributed is on
   code: |-
     _eventData['page_location'] = 'https://example.com/landing';
 
@@ -1201,7 +1429,8 @@ scenarios:
       lastHttpUrl = url;
       return {
         then: (onSuccess) => {
-          onSuccess({ statusCode: 200, headers: {}, body: JSON.stringify({ ok: true, attributed: true, source: 'clid' }) });
+          const body = '{"ok":true,"attributed":true,"source":"clid"}';
+          onSuccess({ statusCode: 200, headers: {}, body: body });
         }
       };
     });
@@ -1276,8 +1505,10 @@ setup: |-
   });
 
   let lastHttpUrl;
+  let httpUrls = [];
   mock('sendHttpGet', (url) => {
     lastHttpUrl = url;
+    httpUrls.push(url);
     return {
       then: (onSuccess, onFailure) => {
         onSuccess({ statusCode: 200, headers: {}, body: '' });
@@ -1289,5 +1520,3 @@ setup: |-
 ___NOTES___
 
 Created on 8/18/2026. Server-side counterpart of the Contimo web template.
-
-
