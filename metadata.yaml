@@ -1,6 +1,10 @@
 homepage: "https://contimo.io/"
 documentation: "https://docs.contimo.app/platform-usage/conversion-tracking-with-gtm"
 versions:
+  - sha: c6b60a8071dddf7a501f9289ac2881b12e9db715
+    changeNotes: Split Click ID storage into three modes - Cookie, Cookie + Contimo backend, and Contimo backend only (no cookie written).
+  - sha: 5d470b201528b84c22adf0602602204e350beac6
+    changeNotes: Add Click ID storage type (cookie + Contimo backend), Visitor ID, and unattributed-event reporting; Track conversion now prefers the page URL over the cookie.
   - sha: c071df73fdd78799a4b1b7031b8a2305bc01c1c3
     changeNotes: Update logo
   - sha: f53323c8d81bbbde5f289bb39b7ef01caf93d60a
