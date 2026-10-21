@@ -264,6 +264,14 @@ ___TEMPLATE_PARAMETERS___
         "simpleValueType": true,
         "help": "Name of the URL query parameter that carries the Contimo Click ID. Used by Init to store the Click ID, and by Track conversion as a fallback when no cookie is present (single-page conversions).",
         "defaultValue": "sclid"
+      },
+      {
+        "type": "CHECKBOX",
+        "name": "debug_logging",
+        "displayName": "Detailed logging (Debug only)",
+        "simpleValueType": true,
+        "defaultValue": false,
+        "help": "When on, the tag sends a debug event to Contimo whenever it cannot find a Click ID, so it shows up in all live Event testing sessions of this account. Use only while debugging: it adds one request per such hit."
       }
     ]
   }
@@ -323,6 +331,11 @@ const CLICK_ID_CAPTURED_ACTION = '19';
 // for a real Click ID.
 const CLICK_ID_SEEN_ACTION = '20';
 const TEST_CLICK_ID_PREFIX = 't_';
+
+// signal's EVENT_ACTIONS["21"] = no_click_id_debug (EVENT CONTRACT shared with signal).
+// Sent only when "Detailed logging (Debug only)" is on and no Click ID can be found
+// (Init: URL + cookie; Track conversion: URL + cookie). Carries no clid and no ua.
+const NO_CLICK_ID_DEBUG_ACTION = '21';
 
 // Reads the Click ID from the query string of the event's page URL.
 // Covers the single-page case: on the landing page every event still
@@ -405,6 +418,42 @@ function reportClickIdSeen(accountId, clickId, cp) {
   sendHttpGet(url).then(
     function() {},
     function() { logToConsole('Contimo: Click ID seen report failed (non-fatal)'); }
+  );
+}
+
+// Fire-and-forget debug event for "no Click ID found" (see NO_CLICK_ID_DEBUG_ACTION).
+// context is 'init' or 'track'; conversionEvent (track only) is the raw conversion_type.
+// No-op unless data.debug_logging is on. Never affects gtmOnSuccess/gtmOnFailure.
+function reportNoClickIdDebug(data, context, conversionEvent, vid) {
+  if (!data.debug_logging || !data.account_id) return;
+
+  const message = context === 'init' ?
+    'Contimo Tag inited with no Click ID' :
+    'Contimo Tag track ' + makeString(conversionEvent) + ' with no Click ID';
+
+  const params = [
+    'a=' + NO_CLICK_ID_DEBUG_ACTION,
+    'cp.message=' + encodeUriComponent(message),
+    'cp.context=' + context
+  ];
+  if (context === 'track') {
+    params.push('cp.event=' + encodeUriComponent(makeString(conversionEvent)));
+  }
+  params.push('cp.tag=sgtm');
+  const host = getPageHost();
+  if (host) {
+    params.push('cp.host=' + encodeUriComponent(host));
+  }
+  if (vid) {
+    params.push('vid=' + encodeUriComponent(vid));
+  }
+
+  const url = signalUrl(data.account_id) + '?' + params.join('&');
+
+  logToConsole('Contimo: debug no-click-id event', url);
+  sendHttpGet(url).then(
+    function() {},
+    function() { logToConsole('Contimo: debug no-click-id event failed (non-fatal)'); }
   );
 }
 
@@ -512,6 +561,10 @@ function init(data) {
       ['host', getPageHost()]
     ]);
 
+    if (!cookieClickId) {
+      reportNoClickIdDebug(data, 'init', null, vid);
+    }
+
     // A Click ID already in the cookie is an attributed visitor on a later page,
     // not an unattributed landing.
     if (!cookieClickId && data.send_unattributed && vid) {
@@ -596,6 +649,10 @@ function trackConversion(data) {
   }
 
   const vid = sanitizeVisitorId(data.visitor_id);
+
+  if (!clickId) {
+    reportNoClickIdDebug(data, 'track', data.conversion_type, vid);
+  }
 
   if (!clickId && !vid && !data.send_unattributed) {
     // Nothing to fire
@@ -1490,6 +1547,174 @@ scenarios:
 
     assertApi('logToConsole').wasCalledWith('Contimo: conversion attributed (duplicate)');
     assertApi('gtmOnSuccess').wasCalled();
+- name: Debug logging on - Init with no Click ID sends the a=21 debug event
+  code: |-
+    _eventData['page_location'] = 'https://example.com/landing?utm_source=x';
+
+    const mockData = { action: 'init', clickid_param: 'sclid', account_id: 'ACC1', debug_logging: true };
+
+    const expectedUrl = 'https://signal.contimo.app/c/ACC1?a=21&cp.message=Contimo%20Tag%20inited%20with%20no%20Click%20ID&cp.context=init&cp.tag=sgtm&cp.host=example.com';
+
+    runCode(mockData);
+
+    assertThat(httpUrls).isEqualTo([expectedUrl]);
+    assertApi('gtmOnSuccess').wasCalled();
+- name: Debug logging on - Init includes vid when Visitor ID is set
+  code: |-
+    _eventData['page_location'] = 'https://example.com/landing';
+
+    const mockData = { action: 'init', clickid_param: 'sclid', account_id: 'ACC1', debug_logging: true, visitor_id: 'ga-client-123' };
+
+    const expectedUrl = 'https://signal.contimo.app/c/ACC1?a=21&cp.message=Contimo%20Tag%20inited%20with%20no%20Click%20ID&cp.context=init&cp.tag=sgtm&cp.host=example.com&vid=ga-client-123';
+
+    runCode(mockData);
+
+    assertThat(httpUrls).isEqualTo([expectedUrl]);
+    assertApi('gtmOnSuccess').wasCalled();
+- name: Debug logging on - Init with a Click ID in the cookie sends no a=21 event
+  code: |-
+    _eventData['page_location'] = 'https://example.com/landing';
+    _cookies['contimo_sclid'] = 'ABC123';
+
+    const mockData = { action: 'init', clickid_param: 'sclid', account_id: 'ACC1', debug_logging: true };
+
+    runCode(mockData);
+
+    assertApi('sendHttpGet').wasNotCalled();
+    assertApi('gtmOnSuccess').wasCalled();
+- name: Debug logging on - Init with a Click ID in the URL sends no a=21 event
+  code: |-
+    _eventData['page_location'] = 'https://example.com/landing?sclid=ABC123';
+
+    const mockData = { action: 'init', clickid_param: 'sclid', account_id: 'ACC1', debug_logging: true };
+
+    runCode(mockData);
+
+    assertThat(httpUrls).isEqualTo(['https://signal.contimo.app/c/ACC1?clid=ABC123&a=19']);
+    assertApi('gtmOnSuccess').wasCalled();
+- name: Debug logging off - Init with no Click ID sends no a=21 event
+  code: |-
+    _eventData['page_location'] = 'https://example.com/landing';
+
+    const mockData = { action: 'init', clickid_param: 'sclid', account_id: 'ACC1' };
+
+    runCode(mockData);
+
+    assertApi('sendHttpGet').wasNotCalled();
+    assertApi('gtmOnSuccess').wasCalled();
+- name: Debug logging on without account_id sends nothing
+  code: |-
+    _eventData['page_location'] = 'https://example.com/landing';
+
+    const mockData = { action: 'init', clickid_param: 'sclid', debug_logging: true };
+
+    runCode(mockData);
+
+    assertApi('sendHttpGet').wasNotCalled();
+    assertApi('gtmOnSuccess').wasCalled();
+- name: Debug logging on - track purchase with no Click ID sends a=21 then the unattributed
+    conversion
+  code: |-
+    _eventData['page_location'] = 'https://example.com/thanks';
+
+    const mockData = {
+      action: 'track_conversion',
+      account_id: 'ACC1',
+      conversion_type: 'purchase',
+      send_unattributed: true,
+      debug_logging: true
+    };
+
+    const expectedDebug = 'https://signal.contimo.app/c/ACC1?a=21&cp.message=Contimo%20Tag%20track%20purchase%20with%20no%20Click%20ID&cp.context=track&cp.event=purchase&cp.tag=sgtm&cp.host=example.com';
+    const expectedConversion = 'https://signal.contimo.app/c/ACC1?a=4&ua=1&cp.source=gtm-server';
+
+    runCode(mockData);
+
+    assertThat(httpUrls).isEqualTo([expectedDebug, expectedConversion]);
+    assertApi('gtmOnSuccess').wasCalled();
+- name: Debug logging on - track with no Click ID sends only the debug event when nothing
+    else fires, and includes vid
+  code: |-
+    _eventData['page_location'] = 'https://example.com/thanks';
+
+    const mockData = {
+      action: 'track_conversion',
+      account_id: 'ACC1',
+      conversion_type: 'lead',
+      debug_logging: true
+    };
+
+    runCode(mockData);
+
+    assertThat(httpUrls).isEqualTo(['https://signal.contimo.app/c/ACC1?a=21&cp.message=Contimo%20Tag%20track%20lead%20with%20no%20Click%20ID&cp.context=track&cp.event=lead&cp.tag=sgtm&cp.host=example.com']);
+    assertApi('gtmOnSuccess').wasCalled();
+- name: Debug logging on - track with Visitor ID and no Click ID sends vid on both requests
+  code: |-
+    _eventData['page_location'] = 'https://example.com/thanks';
+
+    const mockData = {
+      action: 'track_conversion',
+      account_id: 'ACC1',
+      conversion_type: 'qualified_visit',
+      visitor_id: 'ga-client-123',
+      debug_logging: true
+    };
+
+    const expectedDebug = 'https://signal.contimo.app/c/ACC1?a=21&cp.message=Contimo%20Tag%20track%20qualified_visit%20with%20no%20Click%20ID&cp.context=track&cp.event=qualified_visit&cp.tag=sgtm&cp.host=example.com&vid=ga-client-123';
+    const expectedConversion = 'https://signal.contimo.app/c/ACC1?a=3&vid=ga-client-123&cp.source=gtm-server';
+
+    runCode(mockData);
+
+    assertThat(httpUrls).isEqualTo([expectedDebug, expectedConversion]);
+    assertApi('gtmOnSuccess').wasCalled();
+- name: Debug logging on - track with a cookie Click ID sends no a=21 event
+  code: |-
+    _cookies['contimo_sclid'] = 'ABC123';
+
+    const mockData = {
+      action: 'track_conversion',
+      account_id: 'ACC1',
+      conversion_type: 'lead',
+      debug_logging: true
+    };
+
+    runCode(mockData);
+
+    assertThat(httpUrls).isEqualTo(['https://signal.contimo.app/c/ACC1?clid=ABC123&a=2&cp.source=gtm-server']);
+    assertApi('gtmOnSuccess').wasCalled();
+- name: Debug logging on - unknown conversion type with no Click ID still sends the debug
+    event with the raw value, then fails
+  code: |-
+    _eventData['page_location'] = 'https://example.com/thanks';
+
+    const mockData = {
+      action: 'track_conversion',
+      account_id: 'ACC1',
+      conversion_type: 'bogus',
+      send_unattributed: true,
+      debug_logging: true
+    };
+
+    runCode(mockData);
+
+    assertThat(httpUrls).isEqualTo(['https://signal.contimo.app/c/ACC1?a=21&cp.message=Contimo%20Tag%20track%20bogus%20with%20no%20Click%20ID&cp.context=track&cp.event=bogus&cp.tag=sgtm&cp.host=example.com']);
+    assertApi('gtmOnFailure').wasCalled();
+- name: Debug logging off - track with no Click ID sends no a=21 event
+  code: |-
+    _eventData['page_location'] = 'https://example.com/thanks';
+
+    const mockData = {
+      action: 'track_conversion',
+      account_id: 'ACC1',
+      conversion_type: 'purchase',
+      send_unattributed: true
+    };
+
+    runCode(mockData);
+
+    assertThat(httpUrls).isEqualTo(['https://signal.contimo.app/c/ACC1?a=4&ua=1&cp.source=gtm-server']);
+    assertApi('gtmOnSuccess').wasCalled();
+
 setup: |-
   const logToConsole = require('logToConsole');
 

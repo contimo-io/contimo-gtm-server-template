@@ -72,6 +72,15 @@ When the landing URL carries a Contimo **test** Click ID (issued by Event testin
 
 If neither event shows up, the `Init` tag did not fire for that request (check its trigger and consent conditions in GTM Preview). Both events need **Account ID** to be set on the `Init` tag.
 
+### Detailed logging (Debug only)
+
+Under **Contimo tag behavior**, the **Detailed logging (Debug only)** checkbox (default off, both actions) makes the tag send one extra debug event to Contimo whenever it cannot find a Click ID (neither in the page URL nor in the `contimo_sclid` cookie), so it shows up in all live Event testing sessions of this account. Use it only while debugging: it adds one request per such hit. It needs **Account ID** and does not change the tag's normal behaviour or its success/failure result.
+
+- `Init`: `Contimo Tag inited with no Click ID`
+- `Track conversion`: `Contimo Tag track <conversion type> with no Click ID` (e.g. `purchase`, `lead`), sent even when the tag then sends nothing else.
+
+The event is `a=21` with `cp.message`, `cp.context` (`init` or `track`), `cp.event` (track only), `cp.tag=sgtm`, `cp.host`, and `vid` when a Visitor ID is set; it carries no Click ID. Signal (foresight) must support action 21 for it to appear.
+
 ## Notes
 
 - The server tag reports `cp.source=gtm-server` so you can distinguish server-side conversions from web-tag conversions (`cp.source=gtm`) in Contimo.
